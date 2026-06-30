@@ -1,43 +1,51 @@
 # 配置管理 - 统一 JSON 配置系统
 # 所有配置存储在项目根目录 config.json
+# 仅 Minecraft 服务端管理
 
 import os
 import json
-import configparser
+from typing import Optional
 from .logger import log_info, log_debug, log_warn, log_error
-
-# 默认 Minecraft 文件夹路径
-DOT_MINECRAFT = os.path.join(os.getenv("APPDATA", ""), ".minecraft")
 
 # 配置文件路径（项目根目录）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_DIR = PROJECT_ROOT
 CONFIG_JSON = os.path.join(PROJECT_ROOT, "config.json")
-SETUP_INI = os.path.join(PROJECT_ROOT, "Setup.ini")
-ACCOUNTS_FILE = os.path.join(PROJECT_ROOT, "accounts.json")
 CACHE_DIR = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", PROJECT_ROOT)), "CML-Cache")
 
-# 默认配置（launch / general / download 全部统一）
+# 应用数据目录（用于存放服务器数据、Java 等）
+APP_DATA_DIR = os.path.join(PROJECT_ROOT, "DaemonData")
+
+# 默认配置（launch / general / download / server 全部统一）
 DEFAULT_CONFIG: dict = {
-    "launch": {
-        "JavaPath": "",
-        "MinMemory": "1024",
-        "MaxMemory": "4096",
-        "GameDirectory": DOT_MINECRAFT,
-        "VersionIsolation": "false",
-        "JvmArgs": "",
-        "WindowWidth": "854",
-        "WindowHeight": "480",
-        "AutoConnectServer": "",
-    },
-    "general": {
-        "Language": "zh-cn",
-        "Theme": "Light",
+    "server": {
+        "name": "我的服务器",
+        "base": "",
+        "core": "server.jar",
+        "java": "",
+        "min_m": 1024,
+        "max_m": 2048,
+        "args": "",
+        "stop_command": "stop",
+        "auto_restart": False,
+        "force_auto_restart": True,
+        "max_crash_count": 5,
+        "crash_check_window": 300,
+        "monitor_players": True,
+        "ignore_eula": False,
+        "force_exit_delay": 10,
+        "backup_max_count": 20,
+        "backup_delay": 10,
+        "backup_path": "",
+        "status": 0,
     },
     "download": {
         "max_threads": 32,
         "max_retries": 3,
         "timeout": 60,
+    },
+    "general": {
+        "Language": "zh-cn",
     },
 }
 
@@ -47,24 +55,6 @@ def ensure_config_dir():
     os.makedirs(CONFIG_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
     log_debug(f"配置文件: {CONFIG_JSON}")
-
-
-def _migrate_from_ini():
-    # 从旧的 Setup.ini 迁移数据到 config.json
-    if not os.path.exists(SETUP_INI):
-        return None
-    try:
-        parser = configparser.ConfigParser()
-        parser.read(SETUP_INI, encoding="utf-8")
-        migrated: dict = {}
-        for section in parser.sections():
-            key = section.lower()
-            migrated[key] = dict(parser.items(section))
-        log_info("已从 Setup.ini 迁移配置")
-        return migrated
-    except Exception as e:
-        log_debug(f"迁移 Setup.ini 失败: {e}")
-        return None
 
 
 def _load_json() -> dict:
@@ -102,14 +92,7 @@ class ConfigManager:
         for section, options in DEFAULT_CONFIG.items():
             self._data[section] = dict(options)
 
-        # 尝试迁移旧 Setup.ini
-        ini_data = _migrate_from_ini()
-        if ini_data:
-            for section, options in ini_data.items():
-                if section in self._data:
-                    self._data[section].update(options)
-
-        # 加载 config.json（覆盖默认值和旧配置）
+        # 加载 config.json（覆盖默认值）
         json_data = _load_json()
         for section, options in json_data.items():
             sec = section.lower()
@@ -182,80 +165,37 @@ class ConfigManager:
         self._data["download"].update(kwargs)
         self.save()
 
+    # ---- 服务器配置接口（单服务器） ----
 
-class AccountManager:
-    # 账号管理器
+    def get_server_config(self, key: str, fallback: str = ""):
+        """获取服务器配置项（字符串值）"""
+        return str(self._data.get("server", {}).get(key, fallback))
 
-    def __init__(self):
-        ensure_config_dir()
-        self.accounts = []
-        self._load()
-
-    def _load(self):
-        # 加载账号列表
-        if os.path.exists(ACCOUNTS_FILE):
-            try:
-                with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.accounts = data.get("accounts", [])
-                log_debug(f"已加载 {len(self.accounts)} 个账号")
-            except Exception as e:
-                log_warn(f"加载账号失败: {e}")
-                self.accounts = []
-
-    def save(self):
-        # 保存账号列表
-        try:
-            ensure_config_dir()
-            with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"accounts": self.accounts}, f, indent=2, ensure_ascii=False)
-            log_debug(f"账号已保存")
-        except Exception as e:
-            log_error(f"保存账号失败: {e}")
-
-    def add_account(self, account: dict):
-        # 添加账号
-        # 检查是否已存在相同 UUID 的账号
-        for i, acc in enumerate(self.accounts):
-            if acc.get("uuid") == account.get("uuid"):
-                self.accounts[i] = account
-                self.save()
-                return
-        self.accounts.append(account)
+    def set_server_config(self, key: str, value):
+        """设置服务器配置项"""
+        if "server" not in self._data:
+            self._data["server"] = dict(DEFAULT_CONFIG.get("server", {}))
+        self._data["server"][key] = value
         self.save()
 
-    def remove_account(self, index: int) -> bool:
-        # 删除账号
-        if 0 <= index < len(self.accounts):
-            removed = self.accounts.pop(index)
-            self.save()
-            log_info(f"已删除账号: {removed.get('name', '未知')}")
-            return True
-        return False
+    def get_server_config_obj(self):
+        """获取完整服务器配置对象"""
+        from .server.instance import ServerInfo
+        srv = self._data.get("server", {})
+        return ServerInfo.from_dict(srv)
 
-    def get_account(self, index: int) -> dict | None:
-        # 获取指定账号
-        if 0 <= index < len(self.accounts):
-            return self.accounts[index]
-        return None
-
-    def list_accounts(self) -> list[dict]:
-        # 列出所有账号
-        return self.accounts
-
-    def get_active_account(self) -> dict | None:
-        # 获取当前选中的账号
-        for acc in self.accounts:
-            if acc.get("active", False):
-                return acc
-        # 如果没有活跃账号，返回第一个
-        if self.accounts:
-            return self.accounts[0]
-        return None
-
-    def set_active(self, index: int) -> bool:
-        # 设置活跃账号
-        for i, acc in enumerate(self.accounts):
-            acc["active"] = (i == index)
+    def set_server_config_obj(self, server_info):
+        """保存完整服务器配置对象"""
+        self._data["server"] = server_info.to_dict()
         self.save()
-        return True
+
+    # ---- Java 缓存接口 ----
+
+    def set_java_cache(self, java_list: list[dict]):
+        if "java" not in self._data:
+            self._data["java"] = {}
+        self._data["java"]["cache"] = java_list
+        self.save()
+
+    def get_java_cache(self) -> list[dict]:
+        return self._data.get("java", {}).get("cache", [])

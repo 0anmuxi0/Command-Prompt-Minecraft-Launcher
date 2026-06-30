@@ -1,4 +1,4 @@
-# Command Prompt Minecraft Launcher
+# Command Server Launcher
 
 纯命令行的 Minecraft 启动器，提供简洁高效的 Minecraft 版本管理与启动体验。
 
@@ -18,7 +18,7 @@
 ## 预览
 
 ```
-[16:34:48] [main/SUCCESS] Command Prompt Minecraft Launcher - 纯命令行 MC 启动器
+[16:34:48] [main/SUCCESS] Command Server Launcher - 纯命令行 MC 启动器
 [16:34:48] [main/INFO] [1] 账号管理
 [16:34:48] [main/INFO] [2] 启动游戏
 [16:34:48] [main/INFO] [3] 安装 Minecraft 版本
@@ -33,7 +33,7 @@
 
 ### 使用预构建版本
 
-从 [Releases](https://github.com/0anmuxi0/Command-Prompt-Minecraft-Launcher/releases) 下载 `Command Prompt Minecraft Launcher.exe`，双击运行。
+从 [Releases](https://github.com/0anmuxi0/Command-Prompt-Minecraft-Launcher/releases) 下载 `Command Server Launcher.exe`，双击运行。
 
 ### 从源码解释d运行
 
@@ -58,7 +58,7 @@ build.bat
 # 手动构建
 pip install pyinstaller
 pip install -r requirements.txt
-pyinstaller --onefile --console --name "Command Prompt Minecraft Launcher" --add-data "launcher;launcher" main.py
+pyinstaller --onefile --console --name "Command Server Launcher" --add-data "launcher;launcher" main.py
 ```
 
 ## 使用说明
@@ -101,7 +101,7 @@ pyinstaller --onefile --console --name "Command Prompt Minecraft Launcher" --add
 ## 项目结构
 
 ```
-Command Prompt Minecraft Launcher/
+Command Server Launcher/
 ├── main.py                 # 主入口
 ├── build.bat               # 构建脚本
 ├── requirements.txt        # Python 依赖

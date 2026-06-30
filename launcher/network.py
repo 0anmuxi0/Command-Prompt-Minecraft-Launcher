@@ -12,7 +12,7 @@ DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 3
 
 # 用户代理
-USER_AGENT = "CMD-Minecraft-Launcher/1.0.0"
+USER_AGENT = "Command Server Launcher/1.0.0"
 
 # BMCLAPI 镜像
 BMCLAPI_MIRROR = "https://bmclapi2.bangbang93.com"
@@ -87,8 +87,7 @@ def net_request(url: str, method: str = "GET", headers: dict | None = None,
 
 
 def net_download(url: str, save_path: str, timeout: int = DEFAULT_TIMEOUT) -> bool:
-    # 下载文件（单文件，静默模式）
-    # 返回: 是否成功
+    # 下载文件（单文件）
     import os
     for attempt in range(MAX_RETRIES):
         try:
@@ -101,8 +100,12 @@ def net_download(url: str, save_path: str, timeout: int = DEFAULT_TIMEOUT) -> bo
                 with open(save_path, "wb") as f:
                     f.write(resp.read())
             return True
+        except urllib.error.HTTPError as e:
+            log_warn(f"HTTP {e.code}: {save_path} (尝试 {attempt + 1}/{MAX_RETRIES})")
+            if attempt == MAX_RETRIES - 1:
+                return False
         except Exception as e:
-            log_debug(f"下载失败: {save_path} - {e} (尝试 {attempt + 1}/{MAX_RETRIES})")
+            log_warn(f"下载失败: {os.path.basename(save_path)} - {e} (尝试 {attempt + 1}/{MAX_RETRIES})")
             if attempt == MAX_RETRIES - 1:
                 return False
     return False

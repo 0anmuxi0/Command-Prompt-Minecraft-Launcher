@@ -7,7 +7,7 @@ pyinstaller ^
     --onefile ^
     --console ^
     --icon=icon.ico ^
-    --name "Command Prompt Minecraft Launcher" ^
+    --name "Command Server Launcher" ^
     --add-data "launcher;launcher" ^
     --hidden-import launcher.logger ^
     --hidden-import launcher.config ^
@@ -23,6 +23,6 @@ pyinstaller ^
     --hidden-import requests ^
     --hidden-import urllib3 ^
     main.py 
-if exist "build" rmdir /s /q "build"
-if exist "CMD-Minecraft-Launcher.spec" del /q "CMD-Minecraft-Launcher.spec"
+rmdir /s /q "build" >nul
+del /q "*.spec" >nul
 pause >nul

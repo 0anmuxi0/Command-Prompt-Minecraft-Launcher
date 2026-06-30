@@ -1,0 +1,11 @@
+[
+  {
+    "id": "71a1b521-df2a-4780-b2cf-d358405192ec",
+    "name": "1",
+    "type": "backup",
+    "cron": "0 0 * * *",
+    "payload": "",
+    "enable": true,
+    "last_run_time": null
+  }
+]

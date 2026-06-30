@@ -1,601 +1,432 @@
-# CMD-Minecraft-Launcher - 主入口
-# 纯命令行 Minecraft 启动器
-# 基于 Plain Craft Launcher 2 设计
+# Command Server Launcher
+# 纯命令行 Minecraft 服务端管理程序
 #
-# 功能:
-#   - 账号登录 (离线/微软/Yggdrasil)
-#   - 整合包安装 (CurseForge/Modrinth/HMCL/MultiMC/MCBBS)
-#   - Minecraft 版本管理
-#   - 游戏启动
+# 功能: 启动/停止/重启服务器, 下载核心, 备份, 定时任务, 系统监控
 
 import os
 import sys
 import time
-import subprocess
 
-# 确保能导入 launcher 包
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-from launcher.logger import (INFO, DEBUG, ERROR, WARN, REQUEST, SUCCESS, RESET,
-                              log_info, log_debug, log_error, log_warn,
-                              log_success, log_request, log_input)
-from launcher.config import ConfigManager, AccountManager, DOT_MINECRAFT
-from launcher.login import (login_offline, login_microsoft, login_yggdrasil,
-                             LOGIN_TYPE_LEGACY, LOGIN_TYPE_MS, LOGIN_TYPE_AUTH)
-from launcher.minecraft import (MinecraftFolder, MinecraftInstance,
-                                 get_available_minecraft_versions,
-                                 install_minecraft_version, net_get_manifest,
-                                 INSTANCE_STATE_ORIGINAL)
-from launcher.modpack import detect_modpack_type, install_modpack
-from launcher.launch import LaunchOptions, find_java, launch_minecraft
+from launcher.logger import (
+    log_info, log_debug, log_error, log_warn,
+    log_success, log_request, log_input)
+from launcher.config import ConfigManager, APP_DATA_DIR
 from launcher.downloader import init as init_downloader
+from launcher.server import (
+    ServerInfo, ServerManager,
+    ScheduleTask, download_core)
 
 
 def main():
-    os.system("title Command Prompt Minecraft Launcher")
-    # 设置控制台为 UTF-8 编码，防止中文乱码
-    if os.name == "nt":
-        os.system("chcp 65001 >nul")
-    # 主函数
-    log_success("Command Prompt Minecraft Launcher - 纯命令行 MC 启动器")
-    
-    # 初始化配置
+    os.system("title Command Server Launcher")
+    os.system("chcp 65001 >nul")
+
+    log_success("Command Server Launcher - Minecraft 服务端管理程序")
+    log_debug(f"数据目录: {APP_DATA_DIR}")
+
     config = ConfigManager()
-    account_mgr = AccountManager()
-    
-    # 初始化下载器（传入 ConfigManager 统一管理配置）
     init_downloader(config)
-    
-    # 初始化 Minecraft 文件夹
-    game_dir = config.get("Launch", "GameDirectory", DOT_MINECRAFT)
-    mc_folder = MinecraftFolder("默认", game_dir)
-    mc_folder.ensure_dirs()
-    
+    os.makedirs(APP_DATA_DIR, exist_ok=True)
+    os.makedirs(os.path.join(APP_DATA_DIR, "Backups"), exist_ok=True)
+    os.makedirs(os.path.join(APP_DATA_DIR, "Tools", "Java"), exist_ok=True)
+
+    manager = ServerManager()
+    manager.start_scheduler()
+
+    # 开机自启
+    srv = manager.get_config()
+    if srv.run_on_startup:
+        log_info("开机自启已开启，正在启动服务器...")
+        ok, msg = manager.run_foreground()
+        log_info(msg)
+
     while True:
         try:
-            show_menu(config, account_mgr, mc_folder)
+            log_info("[1] 启动/控制服务器")
+            log_info("[2] 下载服务端核心")
+            log_info("[3] 备份管理")
+            log_info("[4] 定时任务")
+            log_info("[5] 设置")
+            log_info("[0] 退出")
             choice = log_input("请选择操作: ").strip()
-            
+
             if choice == "0":
-                log_info("感谢使用 CMD-Minecraft-Launcher，再见!")
-                # 等待3秒
-                time.sleep(3)
+                log_info("正在关闭...")
+                manager.stop_all()
+                log_info("感谢使用!")
+                time.sleep(2)
                 break
             elif choice == "1":
-                handle_login(account_mgr)
+                handle_server_control(config, manager)
             elif choice == "2":
-                handle_launch(config, account_mgr, mc_folder)
+                handle_download_core(config, manager)
             elif choice == "3":
-                handle_install_version(config, mc_folder)
+                handle_backup_manager(config, manager)
             elif choice == "4":
-                handle_install_modpack(config, mc_folder)
+                handle_task_scheduler(config, manager)
             elif choice == "5":
-                handle_manage_versions(mc_folder)
-            elif choice == "6":
-                handle_settings(config)
+                handle_settings(config, manager)
             else:
                 log_warn("无效的选项，请重新输入")
-            
+
         except KeyboardInterrupt:
             log_info("用户取消操作")
+            manager.stop_all()
             break
         except Exception as e:
             log_error(f"发生错误: {e}")
             log_debug(f"详细信息: {e}")
-    
 
-
-def show_menu(config: ConfigManager, account_mgr: AccountManager, mc_folder: MinecraftFolder):
-    # 显示主菜单
-    active_account = account_mgr.get_active_account()
-    account_name = active_account.get("name", "未登录") if active_account else "未登录"
-    account_type = {
-        "legacy": "离线",
-        "microsoft": "微软",
-        "auth": "第三方",
-    }.get(active_account.get("type", "") if active_account else "", "未登录")
-    
-    java_path = config.get("Launch", "JavaPath", "自动检测")
-    if not java_path or java_path == "":
-        java_path = "自动检测"
-    
-    log_info("[1] 账号管理")
-    log_info("[2] 启动游戏")
-    log_info("[3] 安装 Minecraft 版本")
-    log_info("[4] 安装整合包")
-    log_info("[5] 版本管理")
-    log_info("[6] 设置")
-    log_info("[0] 退出")
-
-
-def handle_login(account_mgr: AccountManager):
-    # 处理登录
-    while True:
-        accounts = account_mgr.list_accounts()
-        
-        # 先展示已保存的账号（用编号而非 [n]，避免与菜单冲突）
-        if accounts:
-            log_info(" 已保存的账号:")
-            for i, acc in enumerate(accounts):
-                active = "=>" if acc.get("active") else "  "
-                type_name = {
-                    "legacy": "离线",
-                    "microsoft": "微软",
-                    "auth": "第三方",
-                }.get(acc.get("type", ""), acc.get("type", "未知"))
-                log_info(f"{active} {acc.get('name', '未知')} ({type_name},{i + 1})")
-        else:
-            log_info("暂无已保存的账号")
-
-        log_info("[1] 选择/切换账号")
-        log_info("[2] 添加账号")
-        log_info("[d] 删除账号")
-        log_info("[0] 返回主菜单")
-
-        
-        choice = log_input("请选择: ").strip()
-        
-        if choice == "0":
-            break
-        elif choice == "1":
-            _do_select_account(account_mgr)
-        elif choice == "2":
-            log_info("[1] 离线登录")
-            log_info("[2] 正版登录")
-            log_info("[3] 第三方登录")
-            log_info("[0] 返回")
-
-            choice = log_input("请选择: ").strip()
-            if choice == "0":
-                break
-            elif choice == "1":
-                _do_offline_login(account_mgr)
-            elif choice == "2":
-                _do_microsoft_login(account_mgr)
-            elif choice == "3":
-                _do_yggdrasil_login(account_mgr)
-            
-        elif choice.startswith("d"):
-            _do_delete_account(account_mgr, choice)
-        else:
-            log_warn("无效的选项")
-        
-
-
-
-def _do_offline_login(account_mgr: AccountManager):
-    # 离线登录
-    username = log_input("请输入用户名: ").strip()
-    if not username:
-        log_error("用户名不能为空")
+def handle_server_control(config: ConfigManager, manager: ServerManager):
+    """启动服务器（前台直出日志）"""
+    srv = manager.get_config()
+    log_info(f"服务器: {srv.name}")
+    log_info(f"目录: {srv.base}")
+    log_info(f"核心: {srv.core}")
+    log_info(f"内存: {srv.min_m}-{srv.max_m}MB")
+    if manager.is_running():
+        log_info("服务器已在运行")
         return
-    
-    result = login_offline(username)
-    if result:
-        result["active"] = True
-        account_mgr.add_account(result)
-        log_success("账号已保存")
+    log_info("[t] 启动  [0] 返回")
+    choice = log_input("操作: ").strip().lower()
+    if choice == "t":
+        ok, msg = manager.run_foreground()
+        log_success(msg) if ok else log_error(msg)
 
 
-def _do_microsoft_login(account_mgr: AccountManager):
-    # 微软登录
-    log_info("开始微软登录流程...")
-    result = login_microsoft()
-    if result:
-        result["active"] = True
-        account_mgr.add_account(result)
-        log_success("微软账号已保存")
+def _browse_versions(core_type: str) -> str:
+    """浏览可用版本列表（支持翻页）"""
+    from launcher.network import net_get_manifest
+    PAGE_SIZE = 20
 
-
-def _do_yggdrasil_login(account_mgr: AccountManager):
-    # 第三方 Yggdrasil 登录
-    server_url = log_input("请输入认证服务器地址: ").strip()
-    if not server_url:
-        log_error("服务器地址不能为空")
-        return
-    
-    username = log_input("请输入用户名/邮箱: ").strip()
-    if not username:
-        log_error("用户名不能为空")
-        return
-    
-    password = log_input("请输入密码: ").strip()
-    if not password:
-        log_error("密码不能为空")
-        return
-    
-    result = login_yggdrasil(server_url, username, password)
-    if result:
-        result["active"] = True
-        account_mgr.add_account(result)
-        log_success("第三方账号已保存")
-
-
-def _do_select_account(account_mgr: AccountManager):
-    # 选择账号
-    accounts = account_mgr.list_accounts()
-    if not accounts:
-        log_warn("没有可用的账号")
-        return
-    
-    idx_str = log_input("请输入要选择的账号序号: ").strip()
-    try:
-        idx = int(idx_str) - 1  # 转换为 0-based 索引
-        if 0 <= idx < len(accounts):
-            account_mgr.set_active(idx)
-            acc = accounts[idx]
-            log_success(f"已选择账号: {acc.get('name', '未知')}")
-        else:
-            log_error("无效的序号")
-    except (ValueError, IndexError):
-        log_error("无效的序号")
-
-
-def _do_delete_account(account_mgr: AccountManager, choice: str = ""):
-    # 删除账号（支持多选，如 d012 删除第 0/1/2 号）
-    accounts = account_mgr.list_accounts()
-    if not accounts:
-        log_warn("没有可删除的账号")
-        return
-    
-    idx_str = choice[1:].strip() if choice.startswith("d") else ""
-    if not idx_str:
-        idx_str = log_input("请输入要删除的账号序号 (如 012): ").strip()
-    
-    names = []
-    for ch in idx_str:
-        try:
-            idx = int(ch)
-            if 0 <= idx < len(accounts):
-                acc = accounts[idx]
-                if account_mgr.remove_account(idx):
-                    names.append(acc.get("name", "未知"))
-                    log_success(f"已删除账号: {acc.get('name', '未知')}")
-            else:
-                log_warn(f"无效的序号: {idx}")
-        except ValueError:
-            pass
-    if names:
-        log_info(f"共删除 {len(names)} 个账号")
-
-
-def handle_launch(config: ConfigManager, account_mgr: AccountManager, mc_folder: MinecraftFolder):
-    # 处理启动游戏
-    # 扫描版本
-    versions = mc_folder.scan_versions()
-    if not versions:
-        log_warn("未找到任何 Minecraft 版本")
-        log_info("请先使用 [3] 安装 Minecraft 版本 或 [4] 安装整合包")
-        return
-    # 版本列表序号从1开始
-    for i, ver in enumerate(versions):
-        state_name = ver.get_state_name()
-        log_info(f"[{i + 1}] {ver.name} ({state_name})")
-    
-    
-    idx_str = log_input("请选择要启动的版本序号: ").strip()
-    try:
-        idx = int(idx_str)
-        if idx < 1 or idx > len(versions):
-            log_error("无效的序号")
-            return
-        
-        instance = versions[idx - 1]
-    except ValueError:
-        log_error("请输入有效的数字")
-        return
-    
-    # 检查账号
-    account = account_mgr.get_active_account()
-    if not account:
-        log_warn("未登录账号，将使用离线模式")
-        import uuid
-        account = {
-            "type": "legacy",
-            "name": "Player",
-            "uuid": str(uuid.uuid4()),
-            "access_token": str(uuid.uuid4()),
-        }
-    
-    # 获取 Java
-    needed_java = instance.get_java_version()
-    log_info(f"该版本需要 Java {needed_java}")
-    java_path = config.get("Launch", "JavaPath", "")
-    # 如果已配置 Java，检查版本是否达标且不过高
-    if java_path:
-        from launcher.launch import _get_java_major_version
-        detected = _get_java_major_version(java_path)
-        if detected < needed_java:
-            log_warn(f"配置的 Java {detected} 不满足需求 (需要 Java {needed_java})，重新搜索...")
-            java_path = ""
-        elif detected > needed_java + 1:
-            log_warn(f"配置的 Java {detected} 版本过高 (建议 Java {needed_java})，寻找更匹配的版本...")
-            java_path = ""
-    if not java_path:
-        log_info("正在自动检测 Java...")
-        java_path = find_java(min_version=needed_java)
-        if java_path:
-            config.set("Launch", "JavaPath", java_path)
-    
-    if not java_path:
-        log_error(f"未找到 Java {needed_java}+，请在设置中配置 Java 路径")
-        return
-    
-    # 构建启动选项
-    options = LaunchOptions()
-    options.instance = instance
-    options.account = account
-    options.java_path = java_path
-    options.min_memory = config.get_int("Launch", "MinMemory", 1024)
-    options.max_memory = config.get_int("Launch", "MaxMemory", 2048)
-    options.jvm_args = config.get("Launch", "JvmArgs", "")
-    options.window_width = config.get_int("Launch", "WindowWidth", 854)
-    options.window_height = config.get_int("Launch", "WindowHeight", 480)
-    options.version_isolation = config.get_bool("Launch", "VersionIsolation", False)
-    options.server_ip = config.get("Launch", "AutoConnectServer", "")
-    
-    # 始终开启版本隔离
-    options.version_isolation = True
-
-    log_info("开始启动...")
-    
-    try:
-        launch_minecraft(options)
-    except Exception as e:
-        log_error(f"启动失败: {e}")
-
-
-def handle_install_version(config: ConfigManager, mc_folder: MinecraftFolder):
-    """处理安装 Minecraft 版本"""
-    
-    log_info("正在获取可用版本列表...")
+    log_info("正在获取版本列表...")
     manifest = net_get_manifest()
     if not manifest:
-        log_error("获取版本列表失败，请检查网络连接")
+        log_error("获取版本列表失败")
+        return ""
+
+    all_versions = manifest.get("versions", [])
+    # 先正式版再快照
+    releases = [v for v in all_versions if v.get("type") == "release"]
+    snapshots = [v for v in all_versions if v.get("type") == "snapshot"]
+    versions = releases + snapshots
+
+    total = len(versions)
+    page = 0
+    max_page = (total - 1) // PAGE_SIZE
+
+    while True:
+        start = page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        log_info(f"--- Minecraft 版本列表 (第{page+1}/{max_page+1}页, 共{total}个) ---")
+        for i in range(start, end):
+            v = versions[i]
+            tag = "[R]" if v.get("type") == "release" else "[S]"
+            log_info(f"  {i+1:>4}. {tag} {v['id']:12} {v.get('releaseTime','')[:10]}")
+        log_info("--- 输入版本号直接下载, n下一页, p上一页, q取消 ---")
+
+        cmd = log_input("> ").strip().lower()
+        if cmd == "q":
+            return ""
+        elif cmd == "n":
+            if page < max_page:
+                page += 1
+        elif cmd == "p":
+            if page > 0:
+                page -= 1
+        else:
+            # 尝试匹配版本 ID
+            for v in versions:
+                if v["id"] == cmd:
+                    return cmd
+            # 模糊匹配
+            matches = [v for v in versions if cmd in v["id"]]
+            if len(matches) == 1:
+                return matches[0]["id"]
+            elif len(matches) > 1:
+                log_info(f"匹配到多个版本: {', '.join(v['id'] for v in matches[:10])}")
+            else:
+                log_warn(f"未找到版本: {cmd}")
+
+
+def handle_download_core(config: ConfigManager, manager: ServerManager):
+    """下载服务端核心"""
+    log_success("下载服务端核心")
+    log_info("选择下载类型:")
+    log_info("[1] Vanilla")
+    log_info("[2] Paper")
+    log_info("[3] Purpur")
+    log_info("[4] Fabric")
+    log_info("[5] Forge")
+    log_info("[6] NeoForge")
+    types = {"1": "vanilla", "2": "paper", "3": "purpur",
+             "4": "fabric", "5": "forge", "6": "neoforge"}
+    choice = log_input("选择类型 (1-6): ").strip()
+    core_type = types.get(choice)
+    if not core_type:
+        log_error("无效的选择")
         return
-    
-    versions = get_available_minecraft_versions(manifest)
-    
-    # 显示版本列表
-    releases = [v for v in versions if v.get("type") == "release"]
-    snapshots = [v for v in versions if v.get("type") == "snapshot"]
-    
-    log_info(f"最新正式版: {releases[0].get('id', '') if releases else 'N/A'}")
-    log_info(f"最新快照: {snapshots[0].get('id', '') if snapshots else 'N/A'}")
-    
-    
-    # 显示最近的版本
-    log_info("最近正式版:")
-    for v in releases[:10]:
-        log_info(f"  - {v.get('id', '')} ({v.get('releaseTime', '')[:10]})")
-    
-    
-    log_info("最近快照:")
-    for v in snapshots[:5]:
-        log_info(f"  - {v.get('id', '')} ({v.get('releaseTime', '')[:10]})")
-    
-    
-    version_id = log_input("请输入要安装的版本号 (如 1.20.1): ").strip()
-    if not version_id:
+
+    if core_type in ("vanilla", "paper", "purpur", "fabric", "forge", "neoforge"):
+        log_info("直接输入版本号，或输入 list 浏览可用版本")
+    version = log_input("Minecraft 版本 (如 1.20.1): ").strip().lower()
+    if version == "list":
+        version = _browse_versions(core_type)
+        if not version:
+            return
+    elif not version:
         log_error("版本号不能为空")
         return
-    
-    log_info(f"正在安装 Minecraft {version_id}...")
-    
-    # 询问是否使用镜像
-    use_mirror = log_input("是否使用 BMCLAPI 镜像加速? (Y/n): ").strip().lower()
-    use_mirror = use_mirror != "n"
-    
-    if install_minecraft_version(version_id, mc_folder, use_mirror=use_mirror):
-        log_success(f"Minecraft {version_id} 安装完成!")
-    else:
-        log_error(f"Minecraft {version_id} 安装失败")
 
-
-def handle_install_modpack(config: ConfigManager, mc_folder: MinecraftFolder):
-    """处理安装整合包"""
-    zip_path = log_input("请输入整合包文件路径: ").strip()
-    if not zip_path:
-        log_error("文件路径不能为空")
-        return
-    
-    if not os.path.exists(zip_path):
-        log_error(f"文件不存在: {zip_path}")
-        return
-    
-    if not zip_path.endswith((".zip", ".mrpack")):
-        log_warn("文件可能不是有效的整合包格式（需要 .zip 或 .mrpack）")
-    
-    instance_name = log_input("请输入实例名称 (留空自动生成): ").strip()
-    if not instance_name:
-        instance_name = None
-    
-    log_info("正在安装整合包，请稍候...")
-    
-    if install_modpack(zip_path, mc_folder, instance_name):
-        log_success("整合包安装完成!")
-    else:
-        log_error("整合包安装失败")
-
-
-def handle_manage_versions(mc_folder: MinecraftFolder):
-    # 处理版本管理
-    versions = mc_folder.scan_versions()
-
-    
-    if not versions:
-        log_warn("未找到任何 Minecraft 版本")
-        log_info("请先安装版本或整合包")
-        return
-    
-    log_info(f"共找到 {len(versions)} 个版本:")
-    for i, ver in enumerate(versions, 1):
-        state_name = ver.get_state_name()
-        has_jar = "False" if os.path.exists(ver.jar_path) else "True"
-        log_info(INFO, f"[{i}] {ver.name} JAR:{has_jar}")
-    log_info("[d] 删除版本  [0] 返回")
-    choice = log_input("请选择操作: ").strip().lower()
-    
-    if choice.startswith("d"):
-        idx_str = choice[1:].strip()
-        if not idx_str:
-            idx_str = log_input("请输入要删除的版本序号 (如 123): ").strip()
-        indices = []
-        for ch in idx_str:
-            try:
-                indices.append(int(ch))
-            except ValueError:
-                pass
-        if not indices:
-            log_error("请输入有效的序号")
+    srv = manager.get_config()
+    dest = srv.base
+    if not dest or not os.path.isdir(dest):
+        log_warn(f"服务器目录不存在: {dest}")
+        use_custom = log_input("是否指定其他目录? (y/N): ").strip().lower() == "y"
+        if use_custom:
+            dest = log_input("目标目录: ").strip()
+            if not dest:
+                return
+        else:
             return
-        names = []
-        import shutil
-        for idx in indices:
-            real_idx = idx - 1
-            if 0 <= real_idx < len(versions):
-                ver = versions[real_idx]
-                if os.path.exists(ver.path_version):
-                    shutil.rmtree(ver.path_version, ignore_errors=True)
-                    names.append(ver.name)
-                    log_success(f"已删除版本: {ver.name}")
-                else:
-                    log_warn(f"版本目录不存在: {ver.name}")
-            else:
-                log_warn(f"无效的序号: {idx}")
-        if names:
-            log_info(f"共删除 {len(names)} 个版本")
+
+    os.makedirs(dest, exist_ok=True)
+    log_info(f"正在下载 {core_type} {version} 到 {dest}...")
+
+    filename = download_core(core_type, version, dest)
+    if filename:
+        log_success(f"下载完成: {filename}")
+
+        # 保存配置
+        srv.base = dest
+        srv.core = filename
+        manager.save_config(srv)
+        log_info(f"已保存配置: 目录={dest}, 核心={filename}")
+
+        start_now = log_input("是否立即启动? (Y/n): ").strip().lower()
+        if start_now != "n":
+            ok, msg = manager.run_foreground()
+            log_info(msg)
+    else:
+        log_error("下载失败")
 
 
-def handle_settings(config: ConfigManager):
-    # 处理设置
+def handle_backup_manager(config: ConfigManager, manager: ServerManager):
+    """备份管理"""
     while True:
-        java_path = config.get("Launch", "JavaPath", "")
-        min_mem = config.get_int("Launch", "MinMemory", 1024)
-        max_mem = config.get_int("Launch", "MaxMemory", 2048)
-        game_dir = config.get("Launch", "GameDirectory", DOT_MINECRAFT)
-        version_iso = config.get_bool("Launch", "VersionIsolation", False)
-        jvm_args = config.get("Launch", "JvmArgs", "")
-        window_w = config.get_int("Launch", "WindowWidth", 854)
-        window_h = config.get_int("Launch", "WindowHeight", 480)
-        server_ip = config.get("Launch", "AutoConnectServer", "")
-        
-        dl_cfg = config.get_download_config()
-        max_threads = int(dl_cfg.get("max_threads", 32))
-        max_retries = int(dl_cfg.get("max_retries", 3))
-        timeout = int(dl_cfg.get("timeout", 60))
-        
-        log_info(INFO, f"[1] Java 路径: {java_path or '自动检测'}")
-        log_info(INFO, f"[2] 最小内存: {min_mem} MB")
-        log_info(INFO, f"[3] 最大内存: {max_mem} MB")
-        log_info(INFO, f"[4] 游戏目录: {game_dir}")
-        log_info(INFO, f"[5] 版本隔离: {'开启' if version_iso else '关闭'}")
-        log_info(INFO, f"[6] 额外 JVM 参数: {jvm_args or '无'}")
-        log_info(INFO, f"[7] 窗口大小: {window_w}x{window_h}")
-        log_info(INFO, f"[8] 自动进服: {server_ip or '未设置'}")
-        log_info(INFO, f"[9] 下载线程数: {max_threads}")
-        log_info(INFO, f"[10] 下载重试次数: {'无限' if max_retries == 0 else max_retries}")
-        log_info(INFO, f"[11] 下载超时: {timeout} 秒")
-        ms_client_id = config.get("login", "microsoft_client_id", "")
-        log_info(INFO, f"[12] 微软 OAuth Client ID: {ms_client_id or '未设置'}")
-        log_info(INFO, "[0] 返回主菜单")
+        srv = manager.get_config()
+        log_info(f"备份管理 - {srv.name}")
+        log_info("[1] 创建备份")
+        log_info("[2] 查看备份列表")
+        log_info("[0] 返回")
 
-        
-        choice = log_input("请选择操作: ").strip()
-        
+        choice = log_input("操作: ").strip()
         if choice == "0":
             break
         elif choice == "1":
-            path = log_input("Java 路径 (留空自动检测): ").strip()
-            config.set("Launch", "JavaPath", path)
-            log_success("Java 路径已更新")
+            success, msg = manager.create_backup()
+            log_success(msg) if success else log_error(msg)
         elif choice == "2":
-            val = log_input(f"最小内存 (MB) [{min_mem}]: ").strip()
-            if val:
+            backups = manager.list_backups()
+            if backups:
+                log_info("备份列表:")
+                for i, b in enumerate(backups, 1):
+                    log_info(f"  [{i}] {b['name']} ({b['size_mb']:.1f}MB, {b['mtime_str']})")
+                del_choice = log_input("输入序号删除 (0=返回): ").strip()
                 try:
-                    config.set("Launch", "MinMemory", str(int(val)))
-                    log_success("最小内存已更新")
-                except:
-                    log_error("请输入有效的数字")
-        elif choice == "3":
-            val = log_input(f"最大内存 (MB) [{max_mem}]: ").strip()
-            if val:
-                try:
-                    config.set("Launch", "MaxMemory", str(int(val)))
-                    log_success("最大内存已更新")
-                except:
-                    log_error("请输入有效的数字")
-        elif choice == "4":
-            path = log_input(f"游戏目录 [{game_dir}]: ").strip()
-            if path:
-                config.set("Launch", "GameDirectory", path)
-                log_success("游戏目录已更新")
-        elif choice == "5":
-            config.set("Launch", "VersionIsolation", "false" if version_iso else "true")
-            log_success(f"版本隔离已切换为 {'开启' if not version_iso else '关闭'}")
-        elif choice == "6":
-            args = log_input("额外 JVM 参数: ").strip()
-            config.set("Launch", "JvmArgs", args)
-            log_success("JVM 参数已更新")
-        elif choice == "7":
-            w = log_input(f"窗口宽度 [{window_w}]: ").strip()
-            h = log_input(f"窗口高度 [{window_h}]: ").strip()
-            if w:
-                try:
-                    config.set("Launch", "WindowWidth", str(int(w)))
-                except:
-                    log_error("请输入有效的数字")
-            if h:
-                try:
-                    config.set("Launch", "WindowHeight", str(int(h)))
-                except:
-                    log_error("请输入有效的数字")
-            log_success("窗口大小已更新")
-        elif choice == "8":
-            ip = log_input("自动进服地址 (留空清除): ").strip()
-            config.set("Launch", "AutoConnectServer", ip)
-            log_success("自动进服地址已更新")
-        elif choice == "9":
-            val = log_input(f"下载线程数 [{max_threads}] (0=自动): ").strip()
-            if val:
-                try:
-                    n = max(int(val), 1)
-                    config.set_download_config(max_threads=n)
-                    log_success(f"下载线程数已设为 {n}")
-                except:
-                    log_error("请输入有效的数字")
-        elif choice == "10":
-            val = log_input(f"下载重试次数 [{max_retries}] (0=无限): ").strip()
-            if val:
-                try:
-                    n = max(int(val), 0)
-                    config.set_download_config(max_retries=n)
-                    log_success(f"下载重试次数已设为 {'无限' if n == 0 else n}")
-                except:
-                    log_error("请输入有效的数字")
-        elif choice == "11":
-            val = log_input(f"下载超时 (秒) [{timeout}]: ").strip()
-            if val:
-                try:
-                    n = max(int(val), 5)
-                    config.set_download_config(timeout=n)
-                    log_success(f"下载超时已设为 {n} 秒")
-                except:
-                    log_error("请输入有效的数字")
-        elif choice == "12":
-            val = log_input("微软 OAuth Client ID (留空清除): ").strip()
-            config.set("login", "microsoft_client_id", val)
-            if val:
-                log_success("微软 OAuth Client ID 已更新")
+                    di = int(del_choice) - 1
+                    if 0 <= di < len(backups):
+                        if manager.delete_backup(backups[di]['name']):
+                            log_success("备份已删除")
+                except ValueError:
+                    pass
             else:
-                log_success("已清除微软 OAuth Client ID")
+                log_info("暂无备份")
+
+
+def handle_task_scheduler(config: ConfigManager, manager: ServerManager):
+    """定时任务管理"""
+    while True:
+        tasks = manager.get_tasks()
+        log_info("定时任务列表:")
+        if tasks:
+            for i, t in enumerate(tasks, 1):
+                st = "[启用]" if t.enable else "[禁用]"
+                log_info(f"  [{i}] {st} {t.name} ({t.type}) - {t.cron}")
         else:
-            log_warn("无效的选项")
-        
+            log_info("  暂无定时任务")
+        log_info("[a] 添加任务  [d] 删除任务")
+        log_info("[0] 返回")
+
+        choice = log_input("操作: ").strip()
+        if choice == "0":
+            break
+        elif choice == "a":
+            _add_task(manager)
+        elif choice.startswith("d"):
+            idx_str = choice[1:].strip() or log_input("要删除的任务序号: ").strip()
+            try:
+                idx = int(idx_str) - 1
+                if 0 <= idx < len(tasks):
+                    manager.delete_task(tasks[idx].id)
+                    log_success("任务已删除")
+            except ValueError:
+                log_error("无效的序号")
 
 
+def _add_task(manager: ServerManager):
+    """添加定时任务"""
+    name = log_input("任务名称: ").strip() or f"Task-{int(time.time())}"
+    log_info("类型: [1]命令 [2]启动 [3]停止 [4]重启 [5]备份")
+    type_map = {"1": "command", "2": "start", "3": "stop", "4": "restart", "5": "backup"}
+    task_type = type_map.get(log_input("选择类型: ").strip(), "command")
+
+    log_info("执行频率:")
+    log_info("[1] 每分钟")
+    log_info("[2] 每小时  [3] 每天4点")
+    log_info("[4] 每周一4点  [5] 每月1号4点  [6] 自定义")
+    freq_map = {
+        "1": "* * * * *",
+        "2": "0 0 * * *",
+        "3": "0 0 4 * *",
+        "4": "0 0 4 * * 1",
+        "5": "0 0 4 1 *",
+    }
+    freq = log_input("选择频率 (1-6): ").strip()
+    cron = freq_map.get(freq)
+    if not cron:
+        cron = log_input("Cron (秒 分 时 日 月 周): ").strip()
+        if not cron:
+            log_error("Cron 不能为空")
+            return
+
+    payload = log_input("命令内容: ").strip() if task_type == "command" else ""
+    import uuid
+    task = ScheduleTask(id=str(uuid.uuid4()), name=name, type=task_type, cron=cron, payload=payload, enable=True)
+    if manager.add_task(task):
+        freq_names = {"* * * * *": "每分钟", "0 0 * * *": "每小时",
+                       "0 0 4 * *": "每天4点", "0 0 4 * * 1": "每周一4点",
+                       "0 0 4 1 *": "每月1号4点"}
+        type_names = {"command": "命令", "start": "启动", "stop": "停止",
+                       "restart": "重启", "backup": "备份"}
+        log_success(f"已添加: [{type_names.get(task_type, task_type)}] {name} ({freq_names.get(cron, cron)})")
+    else:
+        log_error("添加失败")
+
+
+def handle_settings(config: ConfigManager, manager: ServerManager):
+    """设置"""
+    while True:
+        srv = manager.get_config()
+        log_info("服务器设置:")
+        log_info(f"[1] 服务器名称: {srv.name}")
+        log_info(f"[2] 工作目录: {srv.base}")
+        log_info(f"[3] 核心文件: {srv.core}")
+        log_info(f"[4] Java 设置")
+        log_info(f"[5] 启动设置")
+        log_info(f"[6] 停止命令: {srv.stop_command}")
+        log_info("[0] 返回")
+
+        choice = log_input("选择: ").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            val = log_input(f"名称 [{srv.name}]: ").strip()
+            if val: srv.name = val; log_success(f"名称 → {val}")
+        elif choice == "2":
+            val = log_input(f"目录 [{srv.base}]: ").strip()
+            if val: srv.base = val; log_success(f"目录 → {val}")
+        elif choice == "3":
+            jars = []
+            if srv.base and os.path.isdir(srv.base):
+                jars = [f for f in os.listdir(srv.base) if f.endswith(".jar")]
+            hint = f" (可选: {', '.join(jars[:5])})" if jars else ""
+            val = log_input(f"核心{hint} [{srv.core}]: ").strip()
+            if val:
+                srv.core = val
+                log_success(f"核心 → {val}")
+            elif jars:
+                srv.core = jars[0]
+                log_success(f"核心 → {jars[0]}")
+        elif choice == "4":
+            _settings_java(srv)
+        elif choice == "5":
+            _settings_startup(srv)
+        elif choice == "6":
+            val = log_input(f"停止命令 [{srv.stop_command}]: ").strip()
+            if val: srv.stop_command = val; log_success(f"停止命令 → {val}")
+
+        manager.save_config(srv)
+
+
+def _settings_java(srv: ServerInfo):
+    """Java 设置子菜单"""
+    while True:
+        log_info("Java 设置:")
+        log_info(f"[1] Java 路径: {srv.java or '自动'}")
+        log_info(f"[2] 最小内存: {srv.min_m} MB")
+        log_info(f"[3] 最大内存: {srv.max_m} MB")
+        log_info(f"[4] JVM 参数: {srv.args or '无'}")
+        log_info("[0] 返回")
+
+        c = log_input("选择: ").strip()
+        if c == "0":
+            break
+        elif c == "1":
+            val = log_input(f"Java 路径 [{srv.java or '自动'}]: ").strip()
+            old = srv.java or "自动"
+            srv.java = val
+            if val != old: log_success(f"Java → {val or '自动'}")
+        elif c == "2":
+            val = log_input(f"最小内存 [{srv.min_m}]: ").strip()
+            if val:
+                try: srv.min_m = int(val); log_success(f"最小内存 → {val}MB")
+                except: log_error("无效数字")
+        elif c == "3":
+            val = log_input(f"最大内存 [{srv.max_m}]: ").strip()
+            if val:
+                try: srv.max_m = int(val); log_success(f"最大内存 → {val}MB")
+                except: log_error("无效数字")
+        elif c == "4":
+            val = log_input(f"JVM 参数 [{srv.args}]: ").strip()
+            srv.args = val
+            log_success(f"JVM 参数 → {val or '无'}")
+
+
+def _settings_startup(srv: ServerInfo):
+    """启动设置子菜单"""
+    while True:
+        crash_max = "无限" if srv.max_crash_count == 0 else str(srv.max_crash_count)
+        log_info("启动设置:")
+        log_info(f"[1] 自动重启: {'开' if srv.auto_restart else '关'}")
+        log_info(f"[2] 连续崩溃次数上限: {crash_max}")
+        log_info(f"[3] 连续崩溃判定时间: {srv.crash_check_window} 秒")
+        log_info(f"[4] 自动启动: {'开' if srv.run_on_startup else '关'}")
+        log_info("[0] 返回")
+
+        c = log_input("选择: ").strip()
+        if c == "0":
+            break
+        elif c == "1":
+            srv.auto_restart = not srv.auto_restart
+            log_success(f"自动重启 → {'开' if srv.auto_restart else '关'}")
+        elif c == "2":
+            val = log_input(f"次数上限 [{crash_max}]: ").strip()
+            if val:
+                try: srv.max_crash_count = max(int(val), 0); log_success(f"上限 → {'无限' if srv.max_crash_count == 0 else str(srv.max_crash_count)}")
+                except: log_error("无效数字")
+        elif c == "3":
+            val = log_input(f"判定时间 [{srv.crash_check_window}]: ").strip()
+            if val:
+                try: srv.crash_check_window = max(int(val), 10); log_success(f"判定时间 → {srv.crash_check_window} 秒")
+                except: log_error("无效数字")
+        elif c == "4":
+            srv.run_on_startup = not srv.run_on_startup
+            log_success(f"自动启动 → {'开' if srv.run_on_startup else '关'}")
 
 if __name__ == "__main__":
     main()

@@ -1,2 +1,2 @@
-# CMD-Minecraft-Launcher - 纯命令行 Minecraft 启动器
-# 基于 Plain Craft Launcher 2 的设计理念
+# Command Server Launcher - 纯命令行 Minecraft 服务端管理程序
+# 基于 MSLX v1.4.7 架构设计
