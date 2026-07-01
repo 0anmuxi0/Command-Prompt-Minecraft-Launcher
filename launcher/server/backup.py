@@ -6,6 +6,9 @@ import zipfile
 import time
 import threading
 from datetime import datetime
+from launcher.server import instance
+from launcher.server.instance import ServerInfo
+from ..logger import log_info, log_debug, log_warn, log_error, log_success
 
 class BackupManager:
     """服务器备份管理器（单服务器）"""
@@ -30,8 +33,8 @@ class BackupManager:
             # 如果是在线服务器，发送 save 命令
             if send_command_fn:
                 log_info("正在执行在线备份...")
-                send_command_fn(instance_id, "save-off")
-                send_command_fn(instance_id, "save-all")
+                send_command_fn(instance, "save-off")
+                send_command_fn(instance, "save-all")
                 time.sleep(server_info.backup_delay)
             
             # 生成备份文件名
@@ -58,7 +61,7 @@ class BackupManager:
             
             # 恢复在线模式
             if send_command_fn:
-                send_command_fn(instance_id, "save-on")
+                send_command_fn(instance, "save-on")
             
             # 清理旧备份
             self._cleanup_old_backups(server_info, backup_dir)

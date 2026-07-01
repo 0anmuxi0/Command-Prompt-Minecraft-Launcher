@@ -6,6 +6,6 @@
     "cron": "0 0 * * *",
     "payload": "",
     "enable": true,
-    "last_run_time": null
+    "last_run_time": "2026-07-01T07:00:00Z"
   }
 ]

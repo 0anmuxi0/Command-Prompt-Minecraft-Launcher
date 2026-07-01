@@ -232,7 +232,12 @@ def _build_args(server_info: ServerInfo, java_exe: str) -> list[str]:
             f"-Xmx{server_info.max_m}M"]
     if server_info.args:
         args.extend(server_info.args.split())
-    args += ["-jar", server_info.core, "nogui"]
+    # NeoForge: core 以 @ 开头时不加 -jar，直接传参文件
+    if server_info.core.startswith("@"):
+        args.append(server_info.core)
+    else:
+        args += ["-jar", server_info.core]
+    args.append("nogui")
     return args
 
 

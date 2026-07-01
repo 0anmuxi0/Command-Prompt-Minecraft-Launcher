@@ -3,8 +3,10 @@
 from __future__ import annotations
 import os
 import re
+import signal
 import zipfile
 import shutil
+import subprocess
 from typing import Callable
 
 from ..logger import log_info, log_warn, log_error, log_success
@@ -263,13 +265,29 @@ def _write_forge_script(base_path: str, version: str, installer: str):
 
 def _download_neoforge(version: str, dest_dir: str, report: Callable) -> str:
     """下载 NeoForge 安装器"""
-    if not re.match(r"^\d+\.\d+", version):
-        code, data = net_request("https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml")
-        if code == 200 and isinstance(data, str):
-            versions = re.findall(r"<version>([^<]+)</version>", data)
-            matching = [v for v in versions if v.startswith(version)]
-            if matching:
-                version = matching[-1]
+    # NeoForge 版本号格式: 21.1.65 (对应 MC 1.21.1)
+    # 将 MC 版本 1.21.1 转为 NeoForge 前缀 21.1
+    neoforge_prefix = version
+    if version.startswith("1."):
+        neoforge_prefix = version[2:]  # 1.21.1 → 21.1
+    neoforge_prefix = re.sub(r"\.0$", "", neoforge_prefix)
+
+    # 总是查询 metadata，找到匹配的 NeoForge 版本
+    code, data = net_request("https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml")
+    if code == 200 and isinstance(data, str):
+        all_neo_versions = re.findall(r"<version>([^<]+)</version>", data)
+        matching = [v for v in all_neo_versions if v.startswith(neoforge_prefix)]
+        if matching:
+            version = matching[-1]
+            report(f"NeoForge 版本: {version}", 20)
+        else:
+            # 没找到匹配，尝试直接搜索版本号中的 MC 版本标识
+            log_warn(f"未找到 NeoForge 版本前缀 {neoforge_prefix}，尝试精确匹配...")
+            if version in all_neo_versions:
+                pass  # version 已经是完整 NeoForge 版本号
+            else:
+                log_error(f"NeoForge {version} 在 BMCLAPI 上未找到")
+                return ""
 
     core_name = f"neoforge-{version}-installer.jar"
     dest = os.path.join(dest_dir, core_name)
@@ -312,360 +330,175 @@ def install_package(package_path: str, target_dir: str,
         return False
 
     report("解压整合包...", 10)
-    try:
-        with zipfile.ZipFile(package_path, "r") as zf:
-            zf.extractall(target_dir)
+    with zipfile.ZipFile(package_path, "r") as zf:
+        zf.extractall(target_dir)
 
-        dirs = [d for d in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, d))]
-        files = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))]
+    dirs = [d for d in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, d))]
+    files = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))]
 
-        if not files and len(dirs) == 1:
-            report("检测到嵌套目录，调整结构...", 30)
-            nested = os.path.join(target_dir, dirs[0])
-            for item in os.listdir(nested):
-                shutil.move(os.path.join(nested, item), os.path.join(target_dir, item))
-            os.rmdir(nested)
+    if not files and len(dirs) == 1:
+        report("检测到嵌套目录，调整结构...", 30)
+        nested = os.path.join(target_dir, dirs[0])
+        for item in os.listdir(nested):
+            shutil.move(os.path.join(nested, item), os.path.join(target_dir, item))
+        os.rmdir(nested)
 
-        report("整合包安装完成", 50)
-        return True
-    except zipfile.BadZipFile:
-        log_error("ZIP 文件损坏")
-        return False
+    report("整合包安装完成", 50)
+    return True
+
+
+def run_forge_installer(installer_path: str, server_dir: str,
+                        java_path: str = "java",
+                        max_retries: int = 3,
+                        progress: Callable[[str, int], None] | None = None) -> str:
+    """运行 Forge/NeoForge 安装器，完成后返回实际服务端核心文件名
     
-    def _download_server_core(self, core_type: str, mc_version: str,
-                               build: str, base_path: str,
-                               report: Callable) -> str:
-        """下载服务端核心文件"""
-        if not mc_version:
-            log_error("未指定 Minecraft 版本")
-            return ""
-        
-        core_type = core_type.lower()
-        
-        if core_type == "vanilla":
-            return self._download_vanilla(mc_version, base_path, report)
-        elif core_type == "paper":
-            return self._download_paper(mc_version, build, base_path, report)
-        elif core_type == "purpur":
-            return self._download_purpur(mc_version, base_path, report)
-        elif core_type == "fabric":
-            return self._download_fabric(mc_version, base_path, report)
-        elif core_type == "forge":
-            return self._download_forge(mc_version, base_path, report)
-        elif core_type == "neoforge":
-            return self._download_neoforge(mc_version, base_path, report)
-        else:
-            log_error(f"不支持的核心类型: {core_type}")
-            return ""
+    流程:
+        1. java -jar installer.jar --install-server <dir>
+        2. 等待安装完成
+        3. 查找生成的服务端 jar
     
-    def _download_vanilla(self, version: str, base_path: str,
-                          report: Callable) -> str:
-        """下载原版服务端"""
-        report(f"正在下载原版 {version} 服务端...", 15)
-        
-        # 通过 BMCLAPI 获取版本信息
-        url = f"https://bmclapi2.bangbang93.com/version/{version}/server"
-        code, data = net_request(url, use_mirror=False)
-        
-        if code != 200 or not isinstance(data, dict):
-            log_error(f"获取原版 {version} 信息失败")
-            return ""
-        
-        server_url = data.get("downloads", {}).get("server", {}).get("url", "")
-        if not server_url:
-            log_error(f"未找到原版 {version} 服务端下载地址")
-            return ""
-        
-        # 替换为 BMCLAPI 镜像
-        server_url = server_url.replace("https://launcher.mojang.com", "https://bmclapi2.bangbang93.com")
-        server_url = server_url.replace("https://piston-data.mojang.com", "https://bmclapi2.bangbang93.com")
-        
-        core_name = f"minecraft_server.{version}.jar"
-        dest = os.path.join(base_path, core_name)
-        
-        report(f"正在下载 {core_name}...", 25)
-        if not net_download(server_url, dest):
-            log_error(f"原版 {version} 服务端下载失败")
-            return ""
-        
-        log_success(f"原版 {version} 服务端下载完成")
-        return core_name
+    Args:
+        max_retries: 失败重试次数（默认3，设为0不重试）
     
-    def _download_paper(self, version: str, build: str, base_path: str,
-                        report: Callable) -> str:
-        """下载 Paper 服务端"""
-        report(f"正在获取 Paper {version} 构建信息...", 15)
-        
-        # 获取构建列表
-        api_url = f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds"
-        code, data = net_request(api_url)
-        
-        if code != 200 or not isinstance(data, dict):
-            log_error(f"获取 Paper {version} 构建列表失败")
-            return ""
-        
-        builds = data.get("builds", [])
-        if not builds:
-            log_error(f"未找到 Paper {version} 的构建")
-            return ""
-        
-        # 选择构建
-        if build == "latest":
-            target_build = builds[-1]
-        else:
-            target_build = None
-            for b in builds:
-                if str(b.get("build", "")) == build:
-                    target_build = b
-                    break
-            if not target_build:
-                log_error(f"未找到 Paper {version} 构建 #{build}")
-                return ""
-        
-        build_num = target_build["build"]
-        download_name = target_build.get("downloads", {}).get("application", {}).get("name", "")
-        
-        if not download_name:
-            log_error("未找到 Paper 下载文件")
-            return ""
-        
-        download_url = (f"https://api.papermc.io/v2/projects/paper/versions/{version}"
-                       f"/builds/{build_num}/downloads/{download_name}")
-        
-        core_name = f"paper-{version}-{build_num}.jar"
-        dest = os.path.join(base_path, core_name)
-        
-        report(f"正在下载 Paper {version} build #{build_num}...", 25)
-        if not net_download(download_url, dest):
-            log_error("Paper 下载失败")
-            return ""
-        
-        log_success(f"Paper {version} build #{build_num} 下载完成")
-        return core_name
-    
-    def _download_purpur(self, version: str, base_path: str, report: Callable) -> str:
-        """下载 Purpur 服务端"""
-        report(f"正在下载 Purpur {version}...", 15)
-        
-        download_url = f"https://api.purpurmc.org/v2/purpur/{version}/latest/download"
-        core_name = f"purpur-{version}.jar"
-        dest = os.path.join(base_path, core_name)
-        
-        if not net_download(download_url, dest):
-            log_error("Purpur 下载失败")
-            return ""
-        
-        log_success(f"Purpur {version} 下载完成")
-        return core_name
-    
-    def _download_fabric(self, version: str, base_path: str, report: Callable) -> str:
-        """下载 Fabric 服务端"""
-        report(f"正在获取 Fabric {version} 加载器信息...", 15)
-        
-        # 获取 Fabric 加载器版本
-        api_url = "https://bmclapi2.bangbang93.com/fabric-meta/versions"
-        code, data = net_request(api_url)
-        
-        if code != 200 or not isinstance(data, list):
-            log_error("获取 Fabric 版本信息失败")
-            return ""
-        
-        # 找最新的加载器
-        loaders = [item for item in data if item.get("loader", {}).get("version", "")]
-        if not loaders:
-            log_error("未找到 Fabric 加载器")
-            return ""
-        
-        latest_loader = loaders[-1]["loader"]["version"]
-        
-        # 获取安装器版本
-        installer_version = "1.0.0"  # 默认
-        
-        # 下载 Fabric 服务端启动器
-        # 使用 fabric-server-launch
-        server_launcher_url = (f"https://bmclapi2.bangbang93.com/maven/net/fabricmc/"
-                              f"fabric-server-launch/{latest_loader}/"
-                              f"fabric-server-launch-{latest_loader}.jar")
-        
-        core_name = f"fabric-server-launch-{latest_loader}.jar"
-        dest = os.path.join(base_path, core_name)
-        
-        report(f"正在下载 Fabric 服务端启动器 {latest_loader}...", 25)
-        
-        # 如果直接下载失败，尝试使用 fabric-installer
-        if not net_download(server_launcher_url, dest):
-            log_warn("Fabric 服务端启动器下载失败，尝试使用安装器...")
-            
-            installer_url = (f"https://bmclapi2.bangbang93.com/maven/net/fabricmc/"
-                           f"fabric-installer/{installer_version}/"
-                           f"fabric-installer-{installer_version}.jar")
-            installer_name = f"fabric-installer-{installer_version}.jar"
-            installer_dest = os.path.join(base_path, installer_name)
-            
-            if not net_download(installer_url, installer_dest):
-                log_error("Fabric 安装器下载失败")
-                return ""
-            
-            # 创建安装脚本
-            self._create_fabric_install_script(base_path, version, latest_loader, installer_name)
-            return installer_name
-        
-        return core_name
-    
-    def _create_fabric_install_script(self, base_path: str, mc_version: str,
-                                       loader_version: str, installer_name: str):
-        """创建 Fabric 安装脚本"""
-        if os.name == "nt":
-            script_content = f"""@echo off
-java -jar {installer_name} server -mcversion {mc_version} -loader {loader_version} -downloadMinecraft
-pause
-"""
-            script_path = os.path.join(base_path, "install_fabric.bat")
-        else:
-            script_content = f"""#!/bin/bash
-java -jar {installer_name} server -mcversion {mc_version} -loader {loader_version} -downloadMinecraft
-"""
-            script_path = os.path.join(base_path, "install_fabric.sh")
-        
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(script_content)
-        
-        if os.name != "nt":
-            os.chmod(script_path, 0o755)
-    
-    def _download_forge(self, version: str, base_path: str, report: Callable) -> str:
-        """下载 Forge 服务端"""
-        report(f"正在获取 Forge {version} 信息...", 15)
-        
-        # 通过 BMCLAPI 获取 Forge 版本
-        url = f"https://bmclapi2.bangbang93.com/forge/version/{version}/download"
-        core_name = f"forge-{version}-installer.jar"
-        dest = os.path.join(base_path, core_name)
-        
-        report(f"正在下载 Forge {version} 安装器...", 25)
-        if not net_download(url, dest):
-            log_error("Forge 下载失败")
-            return ""
-        
-        # 创建安装脚本
-        if os.name == "nt":
-            script = f"""@echo off
-java -jar {core_name} --installServer
-if exist forge-{version}-universal.jar (
-    echo Forge 安装完成
-) else (
-    echo 请手动运行: java -jar {core_name} --installServer
-)
-pause
-"""
-            with open(os.path.join(base_path, "install_forge.bat"), "w", encoding="utf-8") as f:
-                f.write(script)
-        else:
-            script = f"""#!/bin/bash
-java -jar {core_name} --installServer
-"""
-            with open(os.path.join(base_path, "install_forge.sh"), "w", encoding="utf-8") as f:
-                f.write(script)
-            os.chmod(os.path.join(base_path, "install_forge.sh"), 0o755)
-        
-        log_success(f"Forge {version} 安装器下载完成")
-        return core_name
-    
-    def _download_neoforge(self, version: str, base_path: str, report: Callable) -> str:
-        """下载 NeoForge 服务端"""
-        report(f"正在下载 NeoForge {version}...", 15)
-        
-        # 先获取实际版本号
-        import re
-        if not re.match(r'^\d+\.\d+', version):
-            # 可能是 MC 版本号，需要查找对应的 NeoForge 版本
-            url = "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml"
-            code, data = net_request(url)
-            if code == 200 and isinstance(data, str):
-                # 找到匹配的版本
-                versions = re.findall(r'<version>([^<]+)</version>', data)
-                matching = [v for v in versions if v.startswith(version)]
-                if matching:
-                    version = matching[-1]
-        
-        core_name = f"neoforge-{version}-installer.jar"
-        download_url = (f"https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/"
-                       f"{version}/neoforge-{version}-installer.jar")
-        dest = os.path.join(base_path, core_name)
-        
-        report(f"正在下载 NeoForge {version} 安装器...", 25)
-        if not net_download(download_url, dest):
-            log_error("NeoForge 下载失败")
-            return ""
-        
-        # 创建安装脚本
-        if os.name == "nt":
-            script = f"""@echo off
-java -jar {core_name} --install-server {os.path.join(base_path).replace('/', '\\')}
-pause
-"""
-            with open(os.path.join(base_path, "install_neoforge.bat"), "w", encoding="utf-8") as f:
-                f.write(script)
-        else:
-            script = f"""#!/bin/bash
-java -jar {core_name} --install-server {base_path}
-"""
-            with open(os.path.join(base_path, "install_neoforge.sh"), "w", encoding="utf-8") as f:
-                f.write(script)
-            os.chmod(os.path.join(base_path, "install_neoforge.sh"), 0o755)
-        
-        log_success(f"NeoForge {version} 安装器下载完成")
-        return core_name
-    
-    def _install_package(self, request: CreateServerRequest, base_path: str,
-                         report: Callable) -> bool:
-        """安装整合包"""
-        temp_dir = tempfile.mkdtemp(prefix="mslx_pack_")
-        
+    Returns:
+        服务端核心文件名（如 neoforge-21.1.234.jar），失败返回空字符串
+    """
+    def report(msg, pct=0):
+        if progress:
+            progress(msg, pct)
+        log_info(msg)
+
+    if not os.path.isfile(installer_path):
+        log_error(f"安装器不存在: {installer_path}")
+        return ""
+
+    installer_name = os.path.basename(installer_path)
+    is_neoforge = "neo" in installer_name.lower()
+
+    retries = max_retries if max_retries > 0 else 999  # 0 = 无限重试
+    for attempt in range(1, retries + 1):
+        if attempt > 1:
+            log_warn(f"第 {attempt} 次重试安装...")
+            if os.path.exists(server_dir):
+                temp_dir = os.path.join(server_dir, "temp")
+                if os.path.isdir(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+        report(f"正在安装 {installer_name}{' (第'+str(attempt)+'次)' if attempt > 1 else ''}...", 60)
         try:
-            zip_path = ""
-            if request.package_local_path:
-                zip_path = request.package_local_path
-            elif request.package_url:
-                report("正在下载整合包...", 50)
-                zip_name = os.path.basename(request.package_url) or "pack.zip"
-                zip_path = os.path.join(temp_dir, zip_name)
-                if not net_download(request.package_url, zip_path):
-                    log_error("整合包下载失败")
-                    return False
-            
-            if not zip_path or not os.path.exists(zip_path):
-                return False
-            
-            report("正在解压整合包...", 60)
-            
-            # 解压 ZIP
+            proc = subprocess.Popen(
+                [java_path, "-jar", installer_path, "--install-server", server_dir],
+                cwd=server_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+
+            assert proc.stdout is not None
+            success = True
+            for raw in iter(proc.stdout.readline, b""):
+                if not raw:
+                    break
+                try:
+                    text = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    text = raw.decode("gbk", errors="replace")
+                line = text.rstrip("\r\n")
+                if line:
+                    log_info(f"{line}")
+
+            proc.stdout.close()
+            proc.wait(timeout=120)
+
+        except subprocess.TimeoutExpired:
+            log_error("安装器超时（120秒）")
+            _kill_process(proc.pid)
+            continue  # 重试
+        except FileNotFoundError:
+            log_error(f"Java 未找到: {java_path}")
+            return ""
+        except Exception as e:
+            log_error(f"安装过程出错: {e}")
+            return ""
+
+        if proc.returncode != 0:
+            log_error(f"安装器退出码: {proc.returncode}")
+            # 非零退出码可能是网络问题，重试
+            continue
+
+        # 查找实际服务端核心
+        server_jar = _find_server_jar(server_dir, installer_name, is_neoforge)
+        if server_jar:
             try:
-                with zipfile.ZipFile(zip_path, "r") as zf:
-                    zf.extractall(base_path)
-                
-                # 去套娃：如果解压后根目录只有一个文件夹，将内容上移
-                items = os.listdir(base_path)
-                if len(items) == 1:
-                    single_item = os.path.join(base_path, items[0])
-                    if os.path.isdir(single_item):
-                        # 检查该目录下是否有明显的服务器文件
-                        server_files = [f for f in os.listdir(single_item)
-                                       if f.endswith(".jar") or f in ("server.properties", "eula.txt")]
-                        if server_files:
-                            report("检测到嵌套目录结构，正在调整...", 65)
-                            for item in os.listdir(single_item):
-                                shutil.move(
-                                    os.path.join(single_item, item),
-                                    os.path.join(base_path, item)
-                                )
-                            os.rmdir(single_item)
-            except zipfile.BadZipFile:
-                log_error("整合包 ZIP 文件损坏")
-                return False
-            
-            report("整合包安装完成", 70)
-            return True
-            
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+                os.remove(installer_path)
+                log_info("已删除安装器")
+            except Exception:
+                pass
+            log_success(f"安装完成，服务端核心: {server_jar}")
+            return server_jar
+
+        log_error("安装完成但未找到服务端核心文件，重试...")
+        continue
+
+    log_error(f"安装失败，已重试 {retries} 次，请检查网络或手动运行:")
+    log_info(f"  java -jar {installer_name} --install-server {server_dir}")
+    return ""
+
+
+def _find_server_jar(server_dir: str, installer_name: str, is_neoforge: bool) -> str:
+    """在安装目录中查找安装器生成的服务端核心文件"""
+    # 策略1: 匹配 neoforge-{version}.jar（去掉 -installer）
+    base = installer_name.replace("-installer.jar", ".jar")
+    candidate = os.path.join(server_dir, base)
+    if os.path.isfile(candidate):
+        return base
+
+    # 策略2: neoforge-{version}.jar（可能版本号中有差异）
+    pattern = installer_name.replace("-installer.jar", "")
+    for f in sorted(os.listdir(server_dir), key=str.lower):
+        if f.endswith(".jar") and "installer" not in f:
+            if f.startswith(pattern.split("-")[0]) and pattern.split("-")[-1] in f:
+                return f
+
+    # 策略3: forge-{version}-universal.jar / forge-{version}.jar
+    if not is_neoforge:
+        for f in os.listdir(server_dir):
+            if f.endswith(".jar") and "forge" in f.lower() and "installer" not in f:
+                if "universal" in f or f.endswith(".jar"):
+                    return f
+
+    # 策略4 (NeoForge): 从 run.bat 解析 @libraries/... 路径
+    if is_neoforge:
+        run_bat = os.path.join(server_dir, "run.bat")
+        if os.path.isfile(run_bat):
+            try:
+                with open(run_bat, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                import re
+                m = re.search(r'@user_jvm_args\.txt\s+(@\S+)', content)
+                if m:
+                    lib_path = m.group(1)
+                    full_path = os.path.join(server_dir, lib_path.lstrip("@"))
+                    if os.path.isfile(full_path):
+                        log_info(f"NeoForge 启动参数: {lib_path}")
+                        return lib_path
+            except Exception:
+                pass
+
+    return ""
+
+
+def _kill_process(pid: int):
+    """强制结束进程"""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                          capture_output=True, timeout=5)
+        except Exception:
+            pass
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass

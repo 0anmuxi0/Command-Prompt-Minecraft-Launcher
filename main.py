@@ -46,7 +46,7 @@ def main():
 
     while True:
         try:
-            log_info("[1] 启动/控制服务器")
+            log_info("[1] 启动/管理服务器")
             log_info("[2] 下载服务端核心")
             log_info("[3] 备份管理")
             log_info("[4] 定时任务")
@@ -82,20 +82,117 @@ def main():
             log_debug(f"详细信息: {e}")
 
 def handle_server_control(config: ConfigManager, manager: ServerManager):
-    """启动服务器（前台直出日志）"""
+    """服务器控制 + 模组管理"""
     srv = manager.get_config()
-    log_info(f"服务器: {srv.name}")
-    log_info(f"目录: {srv.base}")
-    log_info(f"核心: {srv.core}")
-    log_info(f"内存: {srv.min_m}-{srv.max_m}MB")
-    if manager.is_running():
-        log_info("服务器已在运行")
+    while True:
+        st = "运行中" if manager.is_running() else "已停止"
+        log_info(f"服务器: {srv.name}[{st}]")
+        log_info(f"目录: {srv.base}")
+        log_info(f"核心: {srv.core}  |  内存: {srv.min_m}-{srv.max_m}MB")
+
+        # 显示模组列表
+        _show_mods(srv.base)
+
+        if manager.is_running():
+            log_info("服务器已在运行")
+        else:
+            log_info("[t] 启动服务器")
+        log_info("[m] 模组管理  [0] 返回")
+
+        choice = log_input("操作: ").strip().lower()
+        if choice == "0":
+            break
+        elif choice == "t":
+            if not manager.is_running():
+                ok, msg = manager.run_foreground()
+                log_success(msg) if ok else log_error(msg)
+        elif choice == "m":
+            _handle_mod_manager(srv.base)
+
+
+def _show_mods(server_base: str):
+    """显示模组列表"""
+    from launcher.server.mod import scan_mods
+    mods = scan_mods(server_base)
+    if not mods:
+        log_info("模组: 无")
         return
-    log_info("[t] 启动  [0] 返回")
-    choice = log_input("操作: ").strip().lower()
-    if choice == "t":
-        ok, msg = manager.run_foreground()
-        log_success(msg) if ok else log_error(msg)
+    enabled = [m for m in mods if m.enabled]
+    disabled = [m for m in mods if not m.enabled]
+    parts = []
+    if enabled:
+        parts.append(f"{len(enabled)}个启用")
+    if disabled:
+        parts.append(f"{len(disabled)}个禁用")
+    log_info(f"模组: {', '.join(parts)} (共{len(mods)}个)")
+    for i, m in enumerate(mods, 1):
+        status = "[x]" if m.enabled else "[ ]"
+        ver = f" {m.version}" if m.version else ""
+        log_info(f"  {status} [{i:>3}] {m.name}{ver}")
+
+
+def _handle_mod_manager(server_base: str):
+    """模组管理界面"""
+    from launcher.server.mod import (
+        scan_mods, set_mod_enabled, delete_mod,
+        add_mod, parse_selection)
+
+    while True:
+        mods = scan_mods(server_base)
+        if not mods:
+            log_warn("mods 目录为空或不存在")
+            log_info("[a] 添加模组  [0] 返回")
+            c = log_input("操作: ").strip().lower()
+            if c == "a":
+                path = log_input("模组文件路径: ").strip()
+                if path and os.path.isfile(path):
+                    if add_mod(path, server_base):
+                        log_success("模组已添加")
+                elif path:
+                    log_error("文件不存在")
+            elif c == "0":
+                break
+            continue
+
+        _show_mods(server_base)
+        log_info("")
+        log_info("操作: d<编号>禁用  e<编号>启用  r<编号>移除  a添加模组")
+        log_info("语法: a=全部, 逗号分隔多选, 横线框选  如 d1,4,5-8")
+        log_info("[0] 返回")
+
+        c = log_input(": ").strip().lower()
+        if c == "0":
+            break
+        elif c == "a":
+            path = log_input("模组文件路径: ").strip()
+            if path and os.path.isfile(path):
+                if add_mod(path, server_base):
+                    log_success("模组已添加")
+            elif path:
+                log_error("文件不存在")
+        elif c and c[0] in ("d", "e", "r"):
+            op = c[0]
+            sel = c[1:].strip()
+            indices = parse_selection(sel, len(mods)) if sel else []
+            if not indices:
+                log_error("请指定编号，如 d1,3-5")
+                continue
+            done = 0
+            for idx in indices:
+                m = mods[idx]
+                if op == "d" and m.enabled:
+                    if set_mod_enabled(m.path, False):
+                        log_success(f"禁用: {m.name}")
+                        done += 1
+                elif op == "e" and not m.enabled:
+                    if set_mod_enabled(m.path, True):
+                        log_success(f"启用: {m.name}")
+                        done += 1
+                elif op == "r":
+                    if delete_mod(m.path):
+                        log_success(f"移除: {m.name}")
+                        done += 1
+            log_info(f"完成: {done} 个")
 
 
 def _browse_versions(core_type: str) -> str:
@@ -122,14 +219,14 @@ def _browse_versions(core_type: str) -> str:
     while True:
         start = page * PAGE_SIZE
         end = min(start + PAGE_SIZE, total)
-        log_info(f"--- Minecraft 版本列表 (第{page+1}/{max_page+1}页, 共{total}个) ---")
+        log_info(f"Minecraft 版本列表 (第{page+1}/{max_page+1}页, 共{total}个)")
         for i in range(start, end):
             v = versions[i]
             tag = "[R]" if v.get("type") == "release" else "[S]"
             log_info(f"  {i+1:>4}. {tag} {v['id']:12} {v.get('releaseTime','')[:10]}")
-        log_info("--- 输入版本号直接下载, n下一页, p上一页, q取消 ---")
+        log_info("输入版本号直接下载, n下一页, p上一页, q取消")
 
-        cmd = log_input("> ").strip().lower()
+        cmd = log_input("").strip().lower()
         if cmd == "q":
             return ""
         elif cmd == "n":
@@ -151,6 +248,23 @@ def _browse_versions(core_type: str) -> str:
                 log_info(f"匹配到多个版本: {', '.join(v['id'] for v in matches[:10])}")
             else:
                 log_warn(f"未找到版本: {cmd}")
+
+
+def _mc_version_to_java(mc_version: str) -> int:
+    """从 MC 版本号返回推荐的 Java 主版本"""
+    import re
+    m = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', mc_version)
+    if not m:
+        return 21
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if major == 1:
+        if minor < 17:    return 8
+        if minor == 17:   return 16
+        if 18 <= minor <= 20 and patch <= 4: return 17
+        if minor >= 20:   return 21
+    if major >= 2:
+        return 21
+    return 21
 
 
 def handle_download_core(config: ConfigManager, manager: ServerManager):
@@ -200,6 +314,27 @@ def handle_download_core(config: ConfigManager, manager: ServerManager):
     filename = download_core(core_type, version, dest)
     if filename:
         log_success(f"下载完成: {filename}")
+
+        # 如果是 Forge/NeoForge，自动运行安装器
+        if core_type in ("forge", "neoforge"):
+            log_info("检测到安装器，正在自动安装...")
+            from launcher.server.deploy import run_forge_installer
+            from launcher.server.java import find_java
+
+            # 根据 MC 版本选择合适的 Java 运行安装器
+            need = _mc_version_to_java(version)
+            java_info = find_java(specific_version=need) or find_java(min_version=need)
+            java_exe = java_info.path.replace("javaw.exe", "java.exe") if java_info else "java"
+            log_info(f"使用 Java {need}: {java_exe}")
+            installer_path = os.path.join(dest, filename)
+            real_core = run_forge_installer(installer_path, dest, java_exe,
+                                             max_retries=srv.install_retry_count)
+            if real_core:
+                filename = real_core
+                srv.core = filename
+                log_success(f"安装完成，核心: {filename}")
+            else:
+                log_warn("安装可能不完整，请检查 install_*.bat 手动安装")
 
         # 保存配置
         srv.base = dest
@@ -401,11 +536,13 @@ def _settings_startup(srv: ServerInfo):
     """启动设置子菜单"""
     while True:
         crash_max = "无限" if srv.max_crash_count == 0 else str(srv.max_crash_count)
+        install_retry = "无限" if srv.install_retry_count == 0 else str(srv.install_retry_count)
         log_info("启动设置:")
         log_info(f"[1] 自动重启: {'开' if srv.auto_restart else '关'}")
         log_info(f"[2] 连续崩溃次数上限: {crash_max}")
         log_info(f"[3] 连续崩溃判定时间: {srv.crash_check_window} 秒")
         log_info(f"[4] 自动启动: {'开' if srv.run_on_startup else '关'}")
+        log_info(f"[5] 安装器重试次数: {install_retry}")
         log_info("[0] 返回")
 
         c = log_input("选择: ").strip()
@@ -427,6 +564,11 @@ def _settings_startup(srv: ServerInfo):
         elif c == "4":
             srv.run_on_startup = not srv.run_on_startup
             log_success(f"自动启动 → {'开' if srv.run_on_startup else '关'}")
+        elif c == "5":
+            val = log_input(f"安装器重试次数 [{srv.install_retry_count}]: ").strip()
+            if val:
+                try: srv.install_retry_count = max(int(val), 0); log_success(f"安装器重试次数 → {srv.install_retry_count}")
+                except: log_error("无效数字")
 
 if __name__ == "__main__":
     main()

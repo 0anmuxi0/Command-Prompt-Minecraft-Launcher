@@ -39,6 +39,7 @@ class ServerInfo:
     crash_check_window: int = 300              # 连续崩溃判定时间(秒)
     run_on_startup: bool = False               # 开机自启
     ignore_eula: bool = False                  # 忽略 EULA
+    install_retry_count: int = 3               # 安装器失败重试次数
     status: int = ServerStatus.STOPPED         # 当前状态
 
     def to_dict(self) -> dict:
@@ -63,7 +64,9 @@ class ServerInfo:
     def core_path(self) -> str:
         """获取核心文件绝对路径"""
         if self.core.startswith("@libraries"):
-            return self.core  # NeoForge 特殊模式
+            # @libraries/net/neoforged/... → 转为绝对路径
+            rel = self.core.lstrip("@")
+            return os.path.join(self.base_path, rel)
         return os.path.join(self.base_path, self.core)
 
     @property
